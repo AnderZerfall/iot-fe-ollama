@@ -8,7 +8,7 @@ import type {
 
 const DEFAULT_HOST = "http://localhost:11434";
 
-type TargetAddressSpace = "local";
+type TargetAddressSpace = "loopback" | "local";
 type OllamaRequestInit = RequestInit & {
   targetAddressSpace?: TargetAddressSpace;
 };
@@ -25,7 +25,7 @@ const getTargetAddressSpace = (address: string): TargetAddressSpace | undefined 
     hostname === "127.0.0.1" ||
     /^127(?:\.\d{1,3}){3}$/.test(hostname)
   ) {
-    return "local";
+    return "loopback";
   }
 
   const octets = hostname.split(".").map(Number);
