@@ -2,6 +2,7 @@
 
 import ChatComposer from "./components/chat-composer";
 import ChatHeader from "./components/chat-header";
+import ActivityLog from "./components/activity-log";
 import MessageList from "./components/message-list";
 import { useOllamaChat } from "./hooks/use-ollama-chat";
 
@@ -24,6 +25,7 @@ export default function Page() {
         canClear={!chat.busy && chat.messages.length > 0}
       />
       <MessageList messages={chat.messages} endRef={chat.endRef} />
+      <ActivityLog logs={chat.logs} onClear={chat.clearLogs} />
       <ChatComposer
         input={chat.input}
         setInput={chat.setInput}

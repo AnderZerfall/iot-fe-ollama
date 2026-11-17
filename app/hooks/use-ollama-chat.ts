@@ -1,7 +1,69 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ChatMessage, ConnectionStatus, SelectedImage } from "../types";
+import type {
+  ChatLogEntry,
+  ChatMessage,
+  ConnectionStatus,
+  SelectedImage,
+} from "../types";
 
 const DEFAULT_HOST = "http://localhost:11434";
+
+type TargetAddressSpace = "loopback" | "local";
+type OllamaRequestInit = RequestInit & {
+  targetAddressSpace?: TargetAddressSpace;
+};
+
+const getTargetAddressSpace = (address: string): TargetAddressSpace | undefined => {
+  const hostname = new URL(address).hostname
+    .toLowerCase()
+    .replace(/^\[|\]$/g, "");
+
+  if (
+    hostname === "localhost" ||
+    hostname.endsWith(".localhost") ||
+    hostname === "::1" ||
+    hostname === "127.0.0.1" ||
+    /^127(?:\.\d{1,3}){3}$/.test(hostname)
+  ) {
+    return "loopback";
+  }
+
+  const octets = hostname.split(".").map(Number);
+  const isIpv4 = octets.length === 4 && octets.every(
+    (octet, index) =>
+      Number.isInteger(octet) &&
+      octet >= 0 &&
+      octet <= 255 &&
+      String(octet) === hostname.split(".")[index],
+  );
+  const isPrivateIpv4 =
+    isIpv4 &&
+    (octets[0] === 10 ||
+      octets[0] === 192 && octets[1] === 168 ||
+      octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31 ||
+      octets[0] === 169 && octets[1] === 254 ||
+      octets[0] === 0);
+
+  if (
+    isPrivateIpv4 ||
+    hostname.endsWith(".local") ||
+    /^f[cd][0-9a-f]{2}:/i.test(hostname) ||
+    /^fe[89ab][0-9a-f]:/i.test(hostname)
+  ) {
+    return "local";
+  }
+
+  return undefined;
+};
+
+const fetchOllama = (address: string, init?: RequestInit) => {
+  const targetAddressSpace = getTargetAddressSpace(address);
+  const requestInit: OllamaRequestInit = {
+    ...init,
+    ...(targetAddressSpace ? { targetAddressSpace } : {}),
+  };
+  return fetch(address, requestInit);
+};
 
 const fileToBase64 = (file: File) =>
   new Promise<string>((resolve, reject) => {
@@ -18,17 +80,36 @@ export function useOllamaChat() {
   const [status, setStatus] = useState<ConnectionStatus>("idle");
   const [think, setThink] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [logs, setLogs] = useState<ChatLogEntry[]>([]);
   const [input, setInput] = useState("");
   const [image, setImage] = useState<SelectedImage | null>(null);
   const [busy, setBusy] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
 
+  const addLog = useCallback(
+    (level: ChatLogEntry["level"], message: string) => {
+      const timestamp = new Date().toISOString();
+      const entry = { id: Date.now() + Math.random(), timestamp, level, message };
+      setLogs((currentLogs) => [...currentLogs, entry].slice(-100));
+
+      const consoleMessage = `[Ollama Chat] ${message}`;
+      if (level === "error") {
+        console.error(consoleMessage, { timestamp });
+      } else if (level === "warn") {
+        console.warn(consoleMessage, { timestamp });
+      } else {
+        console.info(consoleMessage, { timestamp });
+      }
+    },
+    [],
+  );
+
   const loadModels = useCallback(async (currentHost: string) => {
+    addLog("info", "Checking Ollama connection and loading models.");
     try {
-      const response = await fetch(
-        `${currentHost.replace(/\/+$/, "")}/api/tags`,
-      );
+      const url = `${currentHost.replace(/\/+$/, "")}/api/tags`;
+      const response = await fetchOllama(url);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
       const data = (await response.json()) as {
@@ -37,14 +118,22 @@ export function useOllamaChat() {
       const names = data.models.map((item) => item.name);
       setModels(names);
       setStatus("ok");
+      addLog(
+        "info",
+        `Connected to Ollama. ${names.length} model${names.length === 1 ? "" : "s"} available.`,
+      );
       setModel((currentModel) =>
         names.includes(currentModel) ? currentModel : (names[0] ?? ""),
       );
-    } catch {
+    } catch (error) {
       setModels([]);
       setStatus("bad");
+      addLog(
+        "error",
+        `Could not load models: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
-  }, []);
+  }, [addLog]);
 
   useEffect(() => {
     const savedHost = localStorage.getItem("ollama_host") || DEFAULT_HOST;
@@ -82,6 +171,7 @@ export function useOllamaChat() {
   const send = async () => {
     const text = input.trim();
     if ((!text && !image) || busy || !model) return;
+    const requestStartedAt = Date.now();
 
     const userMessage: ChatMessage = {
       role: "user",
@@ -103,6 +193,10 @@ export function useOllamaChat() {
     setInput("");
     setImage(null);
     setBusy(true);
+    addLog(
+      "info",
+      `Sending chat request to model "${model}" with ${history.length} message${history.length === 1 ? "" : "s"}.`,
+    );
 
     const controller = new AbortController();
     abortRef.current = controller;
@@ -117,7 +211,7 @@ export function useOllamaChat() {
       let response: Response;
 
       for (;;) {
-        response = await fetch(`${host.replace(/\/+$/, "")}/api/chat`, {
+        response = await fetchOllama(`${host.replace(/\/+$/, "")}/api/chat`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           signal: controller.signal,
@@ -148,6 +242,10 @@ export function useOllamaChat() {
             `HTTP ${response.status}${detail ? `: ${detail}` : ""}`,
           );
         }
+        addLog(
+          "warn",
+          "The request exceeded the model context. Retrying without the oldest conversation turn.",
+        );
 
         const oldestUserIndex = requestHistory.findIndex(
           (message) => message.role === "user",
@@ -200,12 +298,17 @@ export function useOllamaChat() {
           ? { notice: "Older messages were omitted to fit the model's context." }
           : {}),
       }));
+      addLog(
+        "info",
+        `Chat response completed in ${((Date.now() - requestStartedAt) / 1000).toFixed(1)}s.`,
+      );
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") {
         patchLastMessage((lastMessage) => ({
           ...lastMessage,
           streaming: false,
         }));
+        addLog("warn", "Chat request stopped by the user.");
       } else {
         const errorMessage =
           error instanceof TypeError
@@ -218,6 +321,7 @@ export function useOllamaChat() {
           { role: "error", content: errorMessage },
         ]);
         setStatus("bad");
+        addLog("error", `Chat request failed: ${errorMessage}`);
       }
     } finally {
       setBusy(false);
@@ -226,7 +330,11 @@ export function useOllamaChat() {
   };
 
   const stop = () => abortRef.current?.abort();
-  const clearMessages = () => setMessages([]);
+  const clearMessages = () => {
+    setMessages([]);
+    addLog("info", "Chat history cleared.");
+  };
+  const clearLogs = () => setLogs([]);
 
   return {
     host,
@@ -238,6 +346,7 @@ export function useOllamaChat() {
     think,
     setThink,
     messages,
+    logs,
     input,
     setInput,
     image,
@@ -249,5 +358,6 @@ export function useOllamaChat() {
     send,
     stop,
     clearMessages,
+    clearLogs,
   };
 }

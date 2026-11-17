@@ -14,3 +14,10 @@ export type SelectedImage = {
 };
 
 export type ConnectionStatus = "idle" | "ok" | "bad";
+
+export type ChatLogEntry = {
+  id: number;
+  timestamp: string;
+  level: "info" | "warn" | "error";
+  message: string;
+};
