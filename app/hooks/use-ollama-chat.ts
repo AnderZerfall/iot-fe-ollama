@@ -8,7 +8,7 @@ import type {
 
 const DEFAULT_HOST = "http://localhost:11434";
 
-type TargetAddressSpace = "loopback" | "local";
+type TargetAddressSpace = "local";
 type OllamaRequestInit = RequestInit & {
   targetAddressSpace?: TargetAddressSpace;
 };
@@ -25,7 +25,7 @@ const getTargetAddressSpace = (address: string): TargetAddressSpace | undefined 
     hostname === "127.0.0.1" ||
     /^127(?:\.\d{1,3}){3}$/.test(hostname)
   ) {
-    return "loopback";
+    return "local";
   }
 
   const octets = hostname.split(".").map(Number);
@@ -54,6 +54,20 @@ const getTargetAddressSpace = (address: string): TargetAddressSpace | undefined 
   }
 
   return undefined;
+};
+
+const getFetchErrorMessage = (error: unknown, address: string) => {
+  if (!(error instanceof TypeError)) {
+    return error instanceof Error ? error.message : String(error);
+  }
+
+  let targetOrigin: string;
+  try {
+    targetOrigin = new URL(address).origin;
+  } catch {
+    return `Invalid Ollama address: ${address}`;
+  }
+  return `The browser could not reach ${targetOrigin}. In Chrome, allow Local network access for ${window.location.origin} in Site settings. Also make sure Ollama allows this page's origin via OLLAMA_ORIGINS and is running on the computer opening this page.`;
 };
 
 const fetchOllama = (address: string, init?: RequestInit) => {
@@ -106,9 +120,12 @@ export function useOllamaChat() {
   );
 
   const loadModels = useCallback(async (currentHost: string) => {
-    addLog("info", "Checking Ollama connection and loading models.");
+    const url = `${currentHost.replace(/\/+$/, "")}/api/tags`;
+    addLog(
+      "info",
+      `Checking Ollama connection at ${url}.`,
+    );
     try {
-      const url = `${currentHost.replace(/\/+$/, "")}/api/tags`;
       const response = await fetchOllama(url);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
@@ -130,7 +147,7 @@ export function useOllamaChat() {
       setStatus("bad");
       addLog(
         "error",
-        `Could not load models: ${error instanceof Error ? error.message : String(error)}`,
+        `Could not load models: ${getFetchErrorMessage(error, url)}`,
       );
     }
   }, [addLog]);
@@ -312,7 +329,10 @@ export function useOllamaChat() {
       } else {
         const errorMessage =
           error instanceof TypeError
-            ? "Could not connect. Check the address, make sure `ollama serve` is running, and verify OLLAMA_ORIGINS is set."
+            ? getFetchErrorMessage(
+                error,
+                `${host.replace(/\/+$/, "")}/api/chat`,
+              )
             : error instanceof Error
               ? error.message
               : String(error);
